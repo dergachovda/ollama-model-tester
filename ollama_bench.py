@@ -30,12 +30,17 @@ console = Console()
 
 
 def _panel(model: str, content: str, tps: float, tokens: int, elapsed: float) -> Panel:
-    status = f"⚡ {tps:.1f} tok/s  ·  {tokens} tokens  ·  {elapsed:.1f}s"
+    if tokens == 0 and elapsed > 3.0:
+        status = f"[yellow]loading model…[/yellow]  ·  {elapsed:.1f}s"
+        border = "yellow"
+    else:
+        status = f"⚡ {tps:.1f} tok/s  ·  {tokens} tokens  ·  {elapsed:.1f}s"
+        border = "cyan"
     return Panel(
         Text(content),
         title=f"[bold cyan]{model}[/bold cyan]",
         subtitle=f"[dim]{status}[/dim]",
-        border_style="cyan",
+        border_style=border,
         padding=(0, 1),
     )
 
@@ -62,9 +67,10 @@ def benchmark(model: str, prompt: str) -> None:
             console=console,
         ) as live:
             for chunk in stream:
-                if chunk.message.content:
+                if chunk.message and chunk.message.content is not None:
                     content += chunk.message.content
-                    chunk_count += 1
+                    if chunk.message.content:
+                        chunk_count += 1
 
                 elapsed = time.perf_counter() - start
                 tps = chunk_count / elapsed if elapsed > 0 else 0.0
