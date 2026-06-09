@@ -14,11 +14,13 @@ Examples:
     uv run python ollama_bench.py lfm2.5:8b --debug   # writes ollama_bench.log
 """
 
+import json
 import logging
 import platform
 import subprocess
 import sys
 import time
+import urllib.request
 from argparse import ArgumentParser
 from pathlib import Path
 
@@ -80,6 +82,31 @@ def _hardware_table() -> Table:
     t.add_row("RAM", f"{ram_gb:.1f} GB total  ·  {ram_avail_gb:.1f} GB free")
     t.add_row("GPU", _gpu_info())
     return t
+
+
+def _ollama_ps(model: str) -> dict:
+    """Query /api/ps for the running model's memory placement."""
+    try:
+        with urllib.request.urlopen("http://localhost:11434/api/ps", timeout=3) as resp:
+            data = json.loads(resp.read())
+        model_base = model.split(":")[0].lower()
+        for m in data.get("models", []):
+            if model_base in m.get("name", "").lower():
+                return m
+    except Exception:
+        pass
+    return {}
+
+
+def _processor_label(size: int, size_vram: int) -> str:
+    if size <= 0:
+        return "unknown"
+    if size_vram <= 0:
+        return "[red]CPU[/red]"
+    if size_vram >= size * 0.95:
+        return "[green]GPU[/green]"
+    pct = size_vram / size * 100
+    return f"[yellow]GPU+CPU ({pct:.0f}% in VRAM)[/yellow]"
 
 
 def _setup_logging() -> None:
@@ -154,7 +181,8 @@ def benchmark(model: str, prompt: str, debug: bool) -> None:
     think_count = 0
     think_elapsed = 0.0
     chunk_index = 0
-    eval_count = eval_duration_ns = prompt_tokens = total_duration_ns = None
+    eval_count = eval_duration_ns = prompt_tokens = total_duration_ns = load_duration_ns = None
+    ps: dict = {}  # populated after first chunk while model is guaranteed in memory
 
     start = time.perf_counter()
     stream = chat(
@@ -174,6 +202,10 @@ def benchmark(model: str, prompt: str, debug: bool) -> None:
                 if debug:
                     _log_chunk(chunk_index, chunk)
                 chunk_index += 1
+
+                # Capture memory placement once — model is guaranteed loaded
+                if chunk_index == 1:
+                    ps = _ollama_ps(model)
 
                 if chunk.message:
                     if chunk.message.thinking:
@@ -197,6 +229,7 @@ def benchmark(model: str, prompt: str, debug: bool) -> None:
                     eval_duration_ns = chunk.eval_duration
                     prompt_tokens = chunk.prompt_eval_count
                     total_duration_ns = chunk.total_duration
+                    load_duration_ns = chunk.load_duration
     except KeyboardInterrupt:
         console.print("\n[yellow]Interrupted.[/yellow]")
         sys.exit(0)
@@ -219,11 +252,34 @@ def benchmark(model: str, prompt: str, debug: bool) -> None:
         source = "wall-clock estimate"
 
     total_ms = (total_duration_ns / 1e6) if total_duration_ns else elapsed * 1000
+    load_ms = (load_duration_ns / 1e6) if load_duration_ns else None
+
+    # Query Ollama for processor placement and memory usage
+    # (already captured during stream; try again if missed)
+    if not ps:
+        ps = _ollama_ps(model)
+    size = ps.get("size", 0)
+    size_vram = ps.get("size_vram", 0)
 
     table = Table(box=box.ROUNDED, show_header=True, header_style="bold cyan")
-    table.add_column("Metric", style="dim", min_width=22)
-    table.add_column("Value", justify="right", min_width=14)
-    table.add_row("Chunks received", str(chunk_index))
+    table.add_column("Metric", style="dim", min_width=24)
+    table.add_column("Value", justify="right", min_width=16)
+
+    # --- model loading ---
+    if load_ms is not None:
+        table.add_row("Model load time (ms)", f"{load_ms:.0f}")
+    if size > 0:
+        table.add_row("Processor", _processor_label(size, size_vram))
+        table.add_row("Model size", f"{size / 1024**3:.2f} GB")
+        if size_vram > 0:
+            table.add_row("VRAM used", f"{size_vram / 1024**3:.2f} GB")
+        ram_used = size - size_vram
+        if ram_used > 0:
+            table.add_row("RAM used", f"{ram_used / 1024**3:.2f} GB")
+
+    table.add_section()
+
+    # --- generation ---
     table.add_row("Tokens generated", str(eval_count or chunk_count))
     table.add_row("Prompt tokens", str(prompt_tokens or "?"))
     table.add_row("[bold]Tokens / sec[/bold]", f"[bold green]{final_tps:.1f}[/bold green]")
