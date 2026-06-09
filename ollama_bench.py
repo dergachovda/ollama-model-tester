@@ -6,15 +6,19 @@ Streams the model response live inside a rich panel; the subtitle updates
 with current tokens/sec in real-time. Final stats table on completion.
 
 Usage:
-    uv run python ollama_bench.py <model> [prompt]
+    uv run python ollama_bench.py <model> [prompt] [--debug]
 
 Examples:
     uv run python ollama_bench.py qwen3:1.7b
     uv run python ollama_bench.py llama3.2 "What is the capital of France?"
+    uv run python ollama_bench.py lfm2.5:8b --debug   # writes ollama_bench.log
 """
 
+import logging
 import sys
 import time
+from argparse import ArgumentParser
+from pathlib import Path
 
 from ollama import chat
 from rich import box
@@ -25,8 +29,39 @@ from rich.table import Table
 from rich.text import Text
 
 DEFAULT_PROMPT = "Explain LLM quantization in 3 sentences."
+LOG_FILE = Path("ollama_bench.log")
 
 console = Console()
+log = logging.getLogger("ollama_bench")
+
+
+def _setup_logging() -> None:
+    LOG_FILE.unlink(missing_ok=True)
+    logging.basicConfig(
+        filename=LOG_FILE,
+        level=logging.DEBUG,
+        format="%(asctime)s.%(msecs)03d  %(message)s",
+        datefmt="%H:%M:%S",
+    )
+    console.print(f"[dim]Debug logging → {LOG_FILE.resolve()}[/dim]\n")
+
+
+def _log_chunk(i: int, chunk) -> None:
+    msg = getattr(chunk, "message", "<no message attr>")
+    content = getattr(msg, "content", "<no content attr>") if msg else None
+    role = getattr(msg, "role", None) if msg else None
+    log.debug(
+        "chunk #%04d  done=%-5s  role=%-10s  content=%r  "
+        "eval_count=%s  eval_duration=%s  prompt_eval_count=%s  total_duration=%s",
+        i,
+        getattr(chunk, "done", "?"),
+        role,
+        content,
+        getattr(chunk, "eval_count", "-"),
+        getattr(chunk, "eval_duration", "-"),
+        getattr(chunk, "prompt_eval_count", "-"),
+        getattr(chunk, "total_duration", "-"),
+    )
 
 
 def _panel(model: str, content: str, tps: float, tokens: int, elapsed: float) -> Panel:
@@ -45,11 +80,15 @@ def _panel(model: str, content: str, tps: float, tokens: int, elapsed: float) ->
     )
 
 
-def benchmark(model: str, prompt: str) -> None:
+def benchmark(model: str, prompt: str, debug: bool) -> None:
+    if debug:
+        _setup_logging()
+
     console.print(f"[bold]Prompt:[/bold] {prompt}\n")
 
     content = ""
     chunk_count = 0
+    chunk_index = 0
     eval_count = eval_duration_ns = prompt_tokens = total_duration_ns = None
 
     start = time.perf_counter()
@@ -67,6 +106,10 @@ def benchmark(model: str, prompt: str) -> None:
             console=console,
         ) as live:
             for chunk in stream:
+                if debug:
+                    _log_chunk(chunk_index, chunk)
+                chunk_index += 1
+
                 if chunk.message and chunk.message.content is not None:
                     content += chunk.message.content
                     if chunk.message.content:
@@ -85,6 +128,10 @@ def benchmark(model: str, prompt: str) -> None:
         console.print("\n[yellow]Interrupted.[/yellow]")
         sys.exit(0)
 
+    if debug:
+        log.debug("stream ended  total_chunks=%d  content_chunks=%d", chunk_index, chunk_count)
+        console.print(f"[dim]Log written → {LOG_FILE.resolve()}[/dim]")
+
     elapsed = time.perf_counter() - start
 
     # Final accurate stats — prefer Ollama metadata over chunk-counting
@@ -100,6 +147,7 @@ def benchmark(model: str, prompt: str) -> None:
     table = Table(box=box.ROUNDED, show_header=True, header_style="bold cyan")
     table.add_column("Metric", style="dim", min_width=22)
     table.add_column("Value", justify="right", min_width=14)
+    table.add_row("Chunks received", str(chunk_index))
     table.add_row("Tokens generated", str(eval_count or chunk_count))
     table.add_row("Prompt tokens", str(prompt_tokens or "?"))
     table.add_row("[bold]Tokens / sec[/bold]", f"[bold green]{final_tps:.1f}[/bold green]")
@@ -111,17 +159,14 @@ def benchmark(model: str, prompt: str) -> None:
 
 
 def main() -> None:
-    if len(sys.argv) < 2:
-        console.print(
-            f"[bold red]Usage:[/bold red] {sys.argv[0]} <model> [prompt]\n"
-            f'[dim]Example: {sys.argv[0]} qwen3:1.7b "What is gravity?"[/dim]'
-        )
-        sys.exit(1)
+    parser = ArgumentParser(description="Benchmark a local Ollama model.")
+    parser.add_argument("model", help="Model name (e.g. qwen3:1.7b)")
+    parser.add_argument("prompt", nargs="*", help="Prompt text (default: quantization question)")
+    parser.add_argument("--debug", action="store_true", help=f"Log every chunk to {LOG_FILE}")
+    args = parser.parse_args()
 
-    model = sys.argv[1]
-    prompt = " ".join(sys.argv[2:]) if len(sys.argv) > 2 else DEFAULT_PROMPT
-
-    benchmark(model, prompt)
+    prompt = " ".join(args.prompt) if args.prompt else DEFAULT_PROMPT
+    benchmark(args.model, prompt, args.debug)
 
 
 if __name__ == "__main__":
