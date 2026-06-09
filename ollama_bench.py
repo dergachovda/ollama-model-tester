@@ -54,26 +54,30 @@ def benchmark(model: str, prompt: str) -> None:
         stream=True,
     )
 
-    with Live(
-        _panel(model, "", 0.0, 0, 0.0),
-        refresh_per_second=15,
-        vertical_overflow="visible",
-        console=console,
-    ) as live:
-        for chunk in stream:
-            if chunk.message.content:
-                content += chunk.message.content
-                chunk_count += 1
+    try:
+        with Live(
+            _panel(model, "", 0.0, 0, 0.0),
+            refresh_per_second=15,
+            vertical_overflow="visible",
+            console=console,
+        ) as live:
+            for chunk in stream:
+                if chunk.message.content:
+                    content += chunk.message.content
+                    chunk_count += 1
 
-            elapsed = time.perf_counter() - start
-            tps = chunk_count / elapsed if elapsed > 0 else 0.0
-            live.update(_panel(model, content, tps, chunk_count, elapsed))
+                elapsed = time.perf_counter() - start
+                tps = chunk_count / elapsed if elapsed > 0 else 0.0
+                live.update(_panel(model, content, tps, chunk_count, elapsed))
 
-            if chunk.done:
-                eval_count = chunk.eval_count
-                eval_duration_ns = chunk.eval_duration
-                prompt_tokens = chunk.prompt_eval_count
-                total_duration_ns = chunk.total_duration
+                if chunk.done:
+                    eval_count = chunk.eval_count
+                    eval_duration_ns = chunk.eval_duration
+                    prompt_tokens = chunk.prompt_eval_count
+                    total_duration_ns = chunk.total_duration
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Interrupted.[/yellow]")
+        sys.exit(0)
 
     elapsed = time.perf_counter() - start
 
