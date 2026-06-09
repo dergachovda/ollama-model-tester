@@ -66,10 +66,19 @@ def _log_chunk(i: int, chunk) -> None:
     )
 
 
-def _panel(model: str, content: str, thinking: str, tps: float, tokens: int, elapsed: float) -> Panel:
+def _panel(
+    model: str,
+    content: str,
+    thinking: str,
+    think_tps: float,
+    think_tokens: int,
+    tps: float,
+    tokens: int,
+    elapsed: float,
+) -> Panel:
     if tokens == 0 and elapsed > 3.0:
         think_preview = thinking[-120:].replace("\n", " ") if thinking else ""
-        status = f"[yellow]thinking…[/yellow]  ·  {elapsed:.1f}s"
+        status = f"[yellow]thinking…[/yellow]  ·  ⚡ {think_tps:.1f} think tok/s  ·  {think_tokens} tokens  ·  {elapsed:.1f}s"
         body = Text(f"💭 {think_preview}", style="dim italic") if think_preview else Text("")
         border = "yellow"
     else:
@@ -94,6 +103,8 @@ def benchmark(model: str, prompt: str, debug: bool) -> None:
     content = ""
     thinking = ""
     chunk_count = 0
+    think_count = 0
+    think_elapsed = 0.0
     chunk_index = 0
     eval_count = eval_duration_ns = prompt_tokens = total_duration_ns = None
 
@@ -106,7 +117,7 @@ def benchmark(model: str, prompt: str, debug: bool) -> None:
 
     try:
         with Live(
-            _panel(model, "", "", 0.0, 0, 0.0),
+            _panel(model, "", "", 0.0, 0, 0.0, 0, 0.0),
             refresh_per_second=15,
             vertical_overflow="visible",
             console=console,
@@ -119,14 +130,19 @@ def benchmark(model: str, prompt: str, debug: bool) -> None:
                 if chunk.message:
                     if chunk.message.thinking:
                         thinking += chunk.message.thinking
+                        think_count += 1
                     if chunk.message.content is not None:
                         content += chunk.message.content
                         if chunk.message.content:
                             chunk_count += 1
 
                 elapsed = time.perf_counter() - start
+                # freeze thinking elapsed once content starts arriving
+                if chunk_count == 0:
+                    think_elapsed = elapsed
+                think_tps = think_count / think_elapsed if think_elapsed > 0 else 0.0
                 tps = chunk_count / elapsed if elapsed > 0 else 0.0
-                live.update(_panel(model, content, thinking, tps, chunk_count, elapsed))
+                live.update(_panel(model, content, thinking, think_tps, think_count, tps, chunk_count, elapsed))
 
                 if chunk.done:
                     eval_count = chunk.eval_count
@@ -138,7 +154,10 @@ def benchmark(model: str, prompt: str, debug: bool) -> None:
         sys.exit(0)
 
     if debug:
-        log.debug("stream ended  total_chunks=%d  content_chunks=%d", chunk_index, chunk_count)
+        log.debug(
+            "stream ended  total_chunks=%d  think_chunks=%d  content_chunks=%d",
+            chunk_index, think_count, chunk_count,
+        )
         console.print(f"[dim]Log written → {LOG_FILE.resolve()}[/dim]")
 
     elapsed = time.perf_counter() - start
@@ -161,7 +180,10 @@ def benchmark(model: str, prompt: str, debug: bool) -> None:
     table.add_row("Prompt tokens", str(prompt_tokens or "?"))
     table.add_row("[bold]Tokens / sec[/bold]", f"[bold green]{final_tps:.1f}[/bold green]")
     if thinking:
-        table.add_row("Thinking chars", str(len(thinking)))
+        think_tps_final = think_count / think_elapsed if think_elapsed > 0 else 0.0
+        table.add_row("Thinking tokens", str(think_count))
+        table.add_row("[bold]Think tok / sec[/bold]", f"[bold yellow]{think_tps_final:.1f}[/bold yellow]")
+        table.add_row("Thinking time (ms)", f"{think_elapsed * 1000:.0f}")
     table.add_row("Total time (ms)", f"{total_ms:.0f}")
     table.add_row("Measurement", source)
 
