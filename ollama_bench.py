@@ -15,13 +15,17 @@ Examples:
 """
 
 import logging
+import platform
+import subprocess
 import sys
 import time
 from argparse import ArgumentParser
 from pathlib import Path
 
+import psutil
 from ollama import chat
 from rich import box
+from rich.columns import Columns
 from rich.console import Console
 from rich.live import Live
 from rich.panel import Panel
@@ -33,6 +37,49 @@ LOG_FILE = Path("ollama_bench.log")
 
 console = Console()
 log = logging.getLogger("ollama_bench")
+
+
+def _gpu_info() -> str:
+    """Return GPU name(s) via nvidia-smi, or a generic fallback."""
+    try:
+        out = subprocess.check_output(
+            ["nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader"],
+            stderr=subprocess.DEVNULL,
+            timeout=5,
+            text=True,
+        ).strip()
+        return " | ".join(line.strip() for line in out.splitlines() if line.strip())
+    except (FileNotFoundError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        pass
+    # Fallback: PowerShell Get-CimInstance (Windows 11+, wmic removed)
+    try:
+        out = subprocess.check_output(
+            ["powershell", "-NoProfile", "-Command",
+             "Get-CimInstance Win32_VideoController | Select-Object -ExpandProperty Name"],
+            stderr=subprocess.DEVNULL,
+            timeout=8,
+            text=True,
+        )
+        names = [l.strip() for l in out.splitlines() if l.strip()]
+        return " | ".join(names) if names else "N/A"
+    except Exception:
+        return "N/A"
+
+
+def _hardware_table() -> Table:
+    mem = psutil.virtual_memory()
+    cpu = platform.processor() or platform.machine()
+    ram_gb = mem.total / 1024**3
+    ram_avail_gb = mem.available / 1024**3
+
+    t = Table(box=box.SIMPLE, show_header=False, padding=(0, 1))
+    t.add_column(style="dim")
+    t.add_column()
+    t.add_row("OS", f"{platform.system()} {platform.release()}")
+    t.add_row("CPU", cpu)
+    t.add_row("RAM", f"{ram_gb:.1f} GB total  ·  {ram_avail_gb:.1f} GB free")
+    t.add_row("GPU", _gpu_info())
+    return t
 
 
 def _setup_logging() -> None:
@@ -98,6 +145,7 @@ def benchmark(model: str, prompt: str, debug: bool) -> None:
     if debug:
         _setup_logging()
 
+    console.print(Panel(_hardware_table(), title="[bold]Hardware[/bold]", border_style="dim", padding=(0, 1)))
     console.print(f"[bold]Prompt:[/bold] {prompt}\n")
 
     content = ""

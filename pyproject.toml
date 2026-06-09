@@ -5,6 +5,7 @@ description = "Minimal benchmark for local Ollama models — measures tokens/sec
 requires-python = ">=3.11"
 dependencies = [
     "ollama",
+    "psutil",
     "rich",
 ]
 
