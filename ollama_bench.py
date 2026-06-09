@@ -49,14 +49,16 @@ def _setup_logging() -> None:
 def _log_chunk(i: int, chunk) -> None:
     msg = getattr(chunk, "message", "<no message attr>")
     content = getattr(msg, "content", "<no content attr>") if msg else None
+    thinking = getattr(msg, "thinking", "<no thinking attr>") if msg else None
     role = getattr(msg, "role", None) if msg else None
     log.debug(
-        "chunk #%04d  done=%-5s  role=%-10s  content=%r  "
+        "chunk #%04d  done=%-5s  role=%-10s  content=%r  thinking=%r  "
         "eval_count=%s  eval_duration=%s  prompt_eval_count=%s  total_duration=%s",
         i,
         getattr(chunk, "done", "?"),
         role,
         content,
+        thinking,
         getattr(chunk, "eval_count", "-"),
         getattr(chunk, "eval_duration", "-"),
         getattr(chunk, "prompt_eval_count", "-"),
@@ -64,15 +66,18 @@ def _log_chunk(i: int, chunk) -> None:
     )
 
 
-def _panel(model: str, content: str, tps: float, tokens: int, elapsed: float) -> Panel:
+def _panel(model: str, content: str, thinking: str, tps: float, tokens: int, elapsed: float) -> Panel:
     if tokens == 0 and elapsed > 3.0:
-        status = f"[yellow]loading model…[/yellow]  ·  {elapsed:.1f}s"
+        think_preview = thinking[-120:].replace("\n", " ") if thinking else ""
+        status = f"[yellow]thinking…[/yellow]  ·  {elapsed:.1f}s"
+        body = Text(f"💭 {think_preview}", style="dim italic") if think_preview else Text("")
         border = "yellow"
     else:
         status = f"⚡ {tps:.1f} tok/s  ·  {tokens} tokens  ·  {elapsed:.1f}s"
+        body = Text(content)
         border = "cyan"
     return Panel(
-        Text(content),
+        body,
         title=f"[bold cyan]{model}[/bold cyan]",
         subtitle=f"[dim]{status}[/dim]",
         border_style=border,
@@ -87,6 +92,7 @@ def benchmark(model: str, prompt: str, debug: bool) -> None:
     console.print(f"[bold]Prompt:[/bold] {prompt}\n")
 
     content = ""
+    thinking = ""
     chunk_count = 0
     chunk_index = 0
     eval_count = eval_duration_ns = prompt_tokens = total_duration_ns = None
@@ -100,7 +106,7 @@ def benchmark(model: str, prompt: str, debug: bool) -> None:
 
     try:
         with Live(
-            _panel(model, "", 0.0, 0, 0.0),
+            _panel(model, "", "", 0.0, 0, 0.0),
             refresh_per_second=15,
             vertical_overflow="visible",
             console=console,
@@ -110,14 +116,17 @@ def benchmark(model: str, prompt: str, debug: bool) -> None:
                     _log_chunk(chunk_index, chunk)
                 chunk_index += 1
 
-                if chunk.message and chunk.message.content is not None:
-                    content += chunk.message.content
-                    if chunk.message.content:
-                        chunk_count += 1
+                if chunk.message:
+                    if chunk.message.thinking:
+                        thinking += chunk.message.thinking
+                    if chunk.message.content is not None:
+                        content += chunk.message.content
+                        if chunk.message.content:
+                            chunk_count += 1
 
                 elapsed = time.perf_counter() - start
                 tps = chunk_count / elapsed if elapsed > 0 else 0.0
-                live.update(_panel(model, content, tps, chunk_count, elapsed))
+                live.update(_panel(model, content, thinking, tps, chunk_count, elapsed))
 
                 if chunk.done:
                     eval_count = chunk.eval_count
@@ -151,6 +160,8 @@ def benchmark(model: str, prompt: str, debug: bool) -> None:
     table.add_row("Tokens generated", str(eval_count or chunk_count))
     table.add_row("Prompt tokens", str(prompt_tokens or "?"))
     table.add_row("[bold]Tokens / sec[/bold]", f"[bold green]{final_tps:.1f}[/bold green]")
+    if thinking:
+        table.add_row("Thinking chars", str(len(thinking)))
     table.add_row("Total time (ms)", f"{total_ms:.0f}")
     table.add_row("Measurement", source)
 
